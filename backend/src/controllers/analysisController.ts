@@ -169,16 +169,19 @@ export const getAnalysisFor = async (req: Request, res: Response) => {
             .json({ error: "Start and end must be valid numbers" });
     }
 
+    const apiBaseUrl = process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
     const promises = [];
     for (let i = startNum; i <= endNum; i++) {
         promises.push(
-            fetch(`http://localhost:3000/api/analysis/song/${i}`, {
+            fetch(`${apiBaseUrl}/api/analysis/song/${i}`, {
                 method: "POST",
             }),
         );
     }
 
-    Promise.all(promises); // dont wait
+    Promise.all(promises).catch((err) => {
+        console.error("Error in batch analysis trigger:", err);
+    });
 
     res.status(200).json({
         message: "Triggered createSongAnalysis",

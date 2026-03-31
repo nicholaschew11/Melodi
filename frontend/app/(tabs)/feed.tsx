@@ -224,6 +224,27 @@ export default function FeedScreen() {
     );
   };
 
+  const handleReact = (
+    postId: number,
+    likeCount: number,
+    reactionType: string | null,
+    reactionSummary: Record<string, number>
+  ) => {
+    setFeedData((prevData) =>
+      prevData.map((post) =>
+        post.post_id === postId
+          ? {
+              ...post,
+              like_count: likeCount,
+              isLiked: reactionType !== null,
+              userReaction: reactionType as any,
+              reaction_summary: reactionSummary,
+            }
+          : post
+      )
+    );
+  };
+
   const handleComment = (postId: number) => {
     // Navigate to comments or show comment modal
     console.log("Navigate to comments for post:", postId);
@@ -645,6 +666,7 @@ export default function FeedScreen() {
                     <PostCard
                       post={post}
                       onLike={handleLike}
+                      onReact={handleReact}
                       onComment={handleComment}
                       onCommentAdded={handleCommentAdded}
                       surfaceColor={surfaceColor}

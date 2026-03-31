@@ -3,6 +3,9 @@ import { useEffect, useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, TouchableOpacity, View } from 'react-native';
 
 import { PostCard } from '@/components/feed/PostCard';
+import { CompatibilityBadge } from '@/components/profile/CompatibilityBadge';
+import { MoodAura } from '@/components/profile/MoodAura';
+import { TasteDNA } from '@/components/profile/TasteDNA';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -40,6 +43,13 @@ export default function PublicProfileScreen() {
   const [isFollowing, setIsFollowing] = useState(false);
   const [posts, setPosts] = useState<FeedPost[]>([]);
   const [postsLoading, setPostsLoading] = useState(false);
+  const [compatibilityScore, setCompatibilityScore] = useState<number | null>(null);
+  const [tasteProfile, setTasteProfile] = useState<{
+    avg_valence: number | null;
+    avg_arousal: number | null;
+    genre_distribution: Record<string, number>;
+    song_count: number;
+  } | null>(null);
   const { token } = useAuth();
 
   useEffect(() => {
@@ -102,6 +112,45 @@ export default function PublicProfileScreen() {
       loadUserProfile();
     }
   }, [id, token, user]);
+
+  // Fetch taste profile and compatibility
+  useEffect(() => {
+    const fetchTasteData = async () => {
+      if (!id) return;
+
+      try {
+        // Fetch taste profile
+        const profileRes = await fetch(`${API.BACKEND_URL}/api/taste/profile/${id}`, {
+          headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
+        });
+        if (profileRes.ok) {
+          const profileData = await profileRes.json();
+          setTasteProfile(profileData.profile);
+        }
+
+        // Fetch compatibility if viewing another user's profile
+        if (token && user?.id !== id) {
+          const compatRes = await fetch(`${API.BACKEND_URL}/api/taste/compatibility/${id}`, {
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
+              'ngrok-skip-browser-warning': 'true',
+            },
+          });
+          if (compatRes.ok) {
+            const compatData = await compatRes.json();
+            setCompatibilityScore(compatData.compatibility.score);
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching taste data:', error);
+      }
+    };
+
+    if (userProfile) {
+      fetchTasteData();
+    }
+  }, [id, userProfile, token, user]);
 
   // Fetch user posts
   useEffect(() => {
@@ -321,7 +370,11 @@ export default function PublicProfileScreen() {
         </View>
 
         {/* Profile Info */}
-        <View style={[styles.profileCard, { backgroundColor: surfaceColor, borderColor }]}>
+        <MoodAura
+          valence={tasteProfile?.avg_valence ?? null}
+          arousal={tasteProfile?.avg_arousal ?? null}
+          style={[styles.profileCard, { backgroundColor: surfaceColor, borderColor }]}
+        >
           <View style={styles.avatarContainer}>
             <View style={[styles.avatar, { borderColor: primaryColor }]}>
               <IconSymbol name="person.circle.fill" size={40} color={primaryColor} />
@@ -378,26 +431,42 @@ export default function PublicProfileScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Follow Button */}
+          {/* Compatibility Badge + Follow Button */}
           {!isOwnProfile && (
-            <TouchableOpacity 
-              style={[
-                styles.followButton,
-                isFollowing ? { borderColor, backgroundColor: 'transparent' } : { backgroundColor: primaryColor }
-              ]}
-              onPress={handleFollow}
-            >
-              <ThemedText 
+            <View style={styles.actionRow}>
+              {compatibilityScore !== null && (
+                <CompatibilityBadge score={compatibilityScore} />
+              )}
+              <TouchableOpacity
                 style={[
-                  styles.followButtonText,
-                  isFollowing ? { color: primaryColor } : { color: '#FFFFFF' }
+                  styles.followButton,
+                  isFollowing ? { borderColor, backgroundColor: 'transparent' } : { backgroundColor: primaryColor }
                 ]}
+                onPress={handleFollow}
               >
-                {isFollowing ? 'Following' : 'Follow'}
-              </ThemedText>
-            </TouchableOpacity>
+                <ThemedText
+                  style={[
+                    styles.followButtonText,
+                    isFollowing ? { color: primaryColor } : { color: '#FFFFFF' }
+                  ]}
+                >
+                  {isFollowing ? 'Following' : 'Follow'}
+                </ThemedText>
+              </TouchableOpacity>
+            </View>
           )}
-        </View>
+        </MoodAura>
+
+        {/* Taste DNA Visualization */}
+        {tasteProfile && tasteProfile.song_count > 0 && (
+          <View style={[styles.tasteDNAContainer, { backgroundColor: surfaceColor, borderColor }]}>
+            <TasteDNA
+              genreDistribution={tasteProfile.genre_distribution}
+              mutedColor={mutedColor}
+              primaryColor={primaryColor}
+            />
+          </View>
+        )}
 
         {/* Posts Section */}
         <View style={styles.postsSection}>
@@ -578,6 +647,18 @@ const styles = StyleSheet.create({
   followButtonText: {
     fontSize: 14,
     fontWeight: '600',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+  },
+  tasteDNAContainer: {
+    marginHorizontal: 16,
+    marginTop: 16,
+    padding: 16,
+    borderRadius: 16,
+    borderWidth: 1,
   },
   bottomPadding: {
     height: 100,

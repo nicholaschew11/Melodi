@@ -8,6 +8,8 @@ import { ActivityIndicator, Alert, AppState, Dimensions, ScrollView, StyleSheet,
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { PostCard } from '@/components/feed/PostCard';
+import { MoodAura } from '@/components/profile/MoodAura';
+import { TasteDNA } from '@/components/profile/TasteDNA';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -102,6 +104,12 @@ export default function ProfileScreen() {
   const [topArtists, setTopArtists] = useState<TopArtist[]>([]);
   const [listeningStats, setListeningStats] = useState<ListeningStats | null>(null);
   const [selectedTimeRange, setSelectedTimeRange] = useState<'short_term' | 'medium_term' | 'long_term'>('medium_term');
+  const [tasteProfile, setTasteProfile] = useState<{
+    avg_valence: number | null;
+    avg_arousal: number | null;
+    genre_distribution: Record<string, number>;
+    song_count: number;
+  } | null>(null);
 
   // Spotify authentication
   const [request, response, promptAsync] = AuthSession.useAuthRequest(
@@ -448,6 +456,21 @@ export default function ProfileScreen() {
           }
         }
 
+        // Fetch taste profile
+        if (user?.id) {
+          try {
+            const tasteRes = await fetch(`${API.BACKEND_URL}/api/taste/profile/${user.id}`, {
+              headers: { 'ngrok-skip-browser-warning': 'true' },
+            });
+            if (tasteRes.ok) {
+              const tasteData = await tasteRes.json();
+              setTasteProfile(tasteData.profile);
+            }
+          } catch (e) {
+            console.error('Error fetching taste profile:', e);
+          }
+        }
+
         // Load initial music data which will also set listening stats
         await loadMusicData('medium_term');
       } catch (error) {
@@ -616,7 +639,11 @@ export default function ProfileScreen() {
         </View>
 
         {/* Profile Header - Spotify Style */}
-        <View style={styles.profileSection}>
+        <MoodAura
+          valence={tasteProfile?.avg_valence ?? null}
+          arousal={tasteProfile?.avg_arousal ?? null}
+          style={styles.profileSection}
+        >
           <View style={styles.avatarContainer}>
             <View style={[styles.avatar, { backgroundColor: surfaceColor }]}>
               <IconSymbol name="person.fill" size={48} color={primaryColor} />
@@ -654,7 +681,18 @@ export default function ProfileScreen() {
               <ThemedText style={[styles.statLabel, { color: mutedColor }]}>Posts</ThemedText>
             </View>
           </View>
-        </View>
+        </MoodAura>
+
+        {/* Taste DNA */}
+        {tasteProfile && tasteProfile.song_count > 0 && (
+          <View style={{ marginHorizontal: 16, marginTop: 8, marginBottom: 8 }}>
+            <TasteDNA
+              genreDistribution={tasteProfile.genre_distribution}
+              mutedColor={mutedColor}
+              primaryColor={primaryColor}
+            />
+          </View>
+        )}
 
         {/* Tab Switcher */}
         <View style={styles.tabSection}>

@@ -5,7 +5,10 @@ import { API } from "@/constants/theme";
 import { useThemeColor } from "@/hooks/use-theme-color";
 import { useSpotifyAPI } from "@/lib/spotify";
 import { postCardStyles } from "@/styles/postCardStyles";
-import { AlbumRanking, Comment, FeedPost } from "@/types/feed";
+import { AlbumRanking, Comment, FeedPost, REACTION_EMOJI_MAP, ReactionType } from "@/types/feed";
+import { formatRelativeTime } from "@/utils/formatTime";
+import { ReactionPicker } from "./ReactionPicker";
+import { ReactionSummary } from "./ReactionSummary";
 import { Image } from "expo-image";
 import { useEffect, useState } from "react";
 import {
@@ -22,6 +25,7 @@ import { CommentsList } from "./CommentsList";
 interface PostCardProps {
   post: FeedPost;
   onLike: (postId: number, newLikeCount: number, isLiked: boolean) => void;
+  onReact?: (postId: number, likeCount: number, reactionType: ReactionType | null, reactionSummary: Record<string, number>) => void;
   onComment: (postId: number) => void;
   onCommentAdded: (postId: number, comment: Comment) => void;
   surfaceColor: string;
@@ -35,6 +39,7 @@ interface PostCardProps {
 export function PostCard({
   post,
   onLike,
+  onReact,
   onComment,
   onCommentAdded,
   surfaceColor,
@@ -46,23 +51,26 @@ export function PostCard({
 }: PostCardProps) {
   const [isLiking, setIsLiking] = useState(false);
   const [showCommentInput, setShowCommentInput] = useState(false);
+  const [showReactionPicker, setShowReactionPicker] = useState(false);
 
   // Use the isLiked field directly from the API response
   const isLiked = post.isLiked || false;
+  const userReaction = post.userReaction || null;
 
-  const handleLike = async () => {
+  const handleReaction = async (reactionType: ReactionType) => {
     if (!authToken) {
-      Alert.alert("Error", "You must be logged in to like posts");
+      Alert.alert("Error", "You must be logged in to react to posts");
       return;
     }
 
-    if (isLiking) return; // Prevent multiple simultaneous requests
+    if (isLiking) return;
+    setShowReactionPicker(false);
 
     try {
       setIsLiking(true);
 
       const response = await fetch(
-        `${API.BACKEND_URL}/api/posts/${post.post_id}/like`,
+        `${API.BACKEND_URL}/api/posts/${post.post_id}/react`,
         {
           method: "POST",
           headers: {
@@ -70,30 +78,36 @@ export function PostCard({
             Authorization: `Bearer ${authToken}`,
             "ngrok-skip-browser-warning": "true",
           },
+          body: JSON.stringify({ reactionType }),
         }
       );
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
         throw new Error(
-          errorData.message || `HTTP ${response.status}: Failed to like post`
+          errorData.message || `HTTP ${response.status}: Failed to react`
         );
       }
 
       const result = await response.json();
 
-      // Call the parent's onLike callback with the new like count and like status
+      // Call the parent callbacks
       onLike(post.post_id, result.likeCount, result.isLiked);
+      if (onReact) {
+        onReact(post.post_id, result.likeCount, result.reactionType, result.reactionSummary);
+      }
     } catch (error) {
-      console.error("Error liking post:", error);
+      console.error("Error reacting to post:", error);
       Alert.alert(
         "Error",
-        error instanceof Error ? error.message : "Failed to like post"
+        error instanceof Error ? error.message : "Failed to react"
       );
     } finally {
       setIsLiking(false);
     }
   };
+
+  const handleLike = () => handleReaction("love");
 
   const handleCommentSubmit = async (body: string) => {
     if (!authToken) {
@@ -151,25 +165,6 @@ export function PostCard({
 
   const handleUsernameClick = () => {
     router.push(`/profile/${post.users.id}`);
-  };
-
-  const formatTimestamp = (timestamp: string) => {
-    const date = new Date(timestamp);
-    const now = new Date();
-    const diffInSeconds = Math.floor((now.getTime() - date.getTime()) / 1000);
-
-    if (diffInSeconds < 60) {
-      return "Just now";
-    } else if (diffInSeconds < 3600) {
-      const minutes = Math.floor(diffInSeconds / 60);
-      return `${minutes}m ago`;
-    } else if (diffInSeconds < 86400) {
-      const hours = Math.floor(diffInSeconds / 3600);
-      return `${hours}h ago`;
-    } else {
-      const days = Math.floor(diffInSeconds / 86400);
-      return `${days}d ago`;
-    }
   };
 
   const shadowColor = useThemeColor({}, "shadow");
@@ -379,7 +374,7 @@ export function PostCard({
         ></TouchableOpacity>
         <View style={postCardStyles.headerTextContainer}>
           <ThemedText style={postCardStyles.timestamp}>
-            {formatTimestamp(post.created_at)}
+            {formatRelativeTime(post.created_at)}
           </ThemedText>
           <View
             style={{
@@ -597,7 +592,7 @@ export function PostCard({
             <View style={[postCardStyles.progressFill, { backgroundColor: primaryColor }]} />
           </View>
           <View style={[postCardStyles.timestampBadge, { backgroundColor: accentColor }]}>
-            <ThemedText style={postCardStyles.timestampText}>{formatTimestamp(post.created_at)}</ThemedText>
+            <ThemedText style={postCardStyles.timestampText}>{formatRelativeTime(post.created_at)}</ThemedText>
           </View>
         </View>
 
@@ -606,21 +601,45 @@ export function PostCard({
         </ThemedText> */}
 
       {/* Action Buttons */}
-      <View style={postCardStyles.actionsContainer}>
+      <View style={[postCardStyles.actionsContainer, { position: "relative" }]}>
+        <ReactionPicker
+          visible={showReactionPicker}
+          currentReaction={userReaction as ReactionType | null}
+          onSelect={handleReaction}
+          onClose={() => setShowReactionPicker(false)}
+          surfaceColor={surfaceColor}
+          borderColor={borderColor}
+        />
         <View style={postCardStyles.leftActions}>
           <TouchableOpacity
             style={postCardStyles.actionButton}
             onPress={handleLike}
+            onLongPress={() => setShowReactionPicker(true)}
+            delayLongPress={300}
             disabled={isLiking}
           >
-            <IconSymbol
-              name={isLiked ? "heart.fill" : "heart"}
-              size={24}
-              color={isLiked ? primaryColor : mutedColor}
-            />
-            <ThemedText style={postCardStyles.actionCount}>
-              {post.like_count}
-            </ThemedText>
+            {userReaction && userReaction !== "love" ? (
+              <ThemedText style={{ fontSize: 22 }}>
+                {REACTION_EMOJI_MAP[userReaction as ReactionType]?.emoji}
+              </ThemedText>
+            ) : (
+              <IconSymbol
+                name={isLiked ? "heart.fill" : "heart"}
+                size={24}
+                color={isLiked ? primaryColor : mutedColor}
+              />
+            )}
+            {post.reaction_summary && Object.keys(post.reaction_summary).length > 0 ? (
+              <ReactionSummary
+                reactionSummary={post.reaction_summary}
+                totalCount={post.like_count}
+                mutedColor={mutedColor}
+              />
+            ) : (
+              <ThemedText style={postCardStyles.actionCount}>
+                {post.like_count}
+              </ThemedText>
+            )}
           </TouchableOpacity>
 
           <TouchableOpacity

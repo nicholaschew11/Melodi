@@ -4,8 +4,10 @@ import { initializeDatabase } from "./db";
 import analysisRoutes from "./routes/analysis";
 import authRoutes from "./routes/auth";
 import commentsRoutes from "./routes/comments";
+import discoveryRoutes from "./routes/discovery";
 import postsRoutes from "./routes/posts";
 import songsRoutes from "./routes/songs";
+import tasteRoutes from "./routes/taste";
 import usersRoutes from "./routes/users";
 
 const cors = require("cors");
@@ -45,6 +47,8 @@ app.use("/api/songs", songsRoutes);
 app.use("/api/save-songs", songsRoutes);
 app.use("/api/users", usersRoutes);
 app.use("/api/analysis", analysisRoutes);
+app.use("/api/taste", tasteRoutes);
+app.use("/api/discovery", discoveryRoutes);
 app.use("/api/comments", commentsRoutes);
 
 const startServer = async () => {

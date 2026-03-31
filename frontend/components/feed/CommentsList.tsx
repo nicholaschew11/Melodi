@@ -1,6 +1,7 @@
 import { ThemedText } from "@/components/themed-text";
 import { IconSymbol } from "@/components/ui/icon-symbol";
 import { Comment } from "@/types/feed";
+import { formatRelativeTime } from "@/utils/formatTime";
 import { useState } from "react";
 import { StyleSheet, TouchableOpacity, View } from "react-native";
 import { router } from "expo-router";
@@ -17,11 +18,6 @@ export function CommentsList({ comments, mutedColor }: CommentsListProps) {
   if (!comments || comments.length === 0) {
     return null;
   }
-
-  const formatTimestamp = (timestamp: string): string => {
-    // Replace this with your actual timestamp formatting logic
-    return new Date(timestamp).toLocaleString();
-  };
 
   const handleUsernameClick = (userId: string) => {
     router.push(`/profile/${userId}`);
@@ -50,7 +46,7 @@ export function CommentsList({ comments, mutedColor }: CommentsListProps) {
                   </ThemedText>
                 </TouchableOpacity>
                 <ThemedText style={[styles.commentTime, { color: mutedColor }]}>
-                  {formatTimestamp(comment.created_at)}
+                  {formatRelativeTime(comment.created_at)}
                 </ThemedText>
               </View>
               <ThemedText style={styles.commentBody}>{comment.body}</ThemedText>

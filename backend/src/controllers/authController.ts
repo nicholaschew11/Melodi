@@ -10,11 +10,12 @@ export const syncUser = async (req: Request, res: Response) => {
             return res.status(400).json({ message: 'User ID is required' });
         }
 
+        if (username && (username.length < 3 || username.length > 30)) {
+            return res.status(400).json({ message: 'Username must be between 3 and 30 characters' });
+        }
+
         const supabase = await getDatabase();
 
-        const { data, error: testError } = await supabase.from('users').select('*').limit(1)
-        console.log('Test select result:', data, testError)
-        
         // Check if user already exists in our custom table
         const { data: existingUser } = await supabase
             .from('users')

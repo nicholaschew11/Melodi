@@ -1,0 +1,9 @@
+# Dev script state
+.dev-pids
+
+# Environment files (may contain secrets)
+.env
+.env.local
+
+# Docker volumes
+melodi_pgdata/

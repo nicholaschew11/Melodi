@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import { getDatabase } from "../db";
 import { AuthRequest } from "../middleware/auth";
 import { createOrGetSong } from "./songsController";
+import { invalidateTasteProfile } from "./tasteController";
 
 // Get user's song rankings
 export const getUserSongRankings = async (req: AuthRequest, res: Response) => {
@@ -63,9 +64,17 @@ export const createPost = async (req: AuthRequest, res: Response) => {
     }
 
     // Must have either spotifyId (for single song) or albumId (for album ranking)
+    // Must have either spotifyId (for single song) or albumId (for album ranking)
     if (!spotifyId && !albumId) {
       return res.status(400).json({
         message: "Either Spotify ID (for song) or Album ID (for album ranking) is required",
+      });
+    }
+
+    // Validate content length
+    if (content && content.length > 5000) {
+      return res.status(400).json({
+        message: "Post content exceeds maximum length of 5000 characters",
       });
     }
 
@@ -226,6 +235,9 @@ export const createPost = async (req: AuthRequest, res: Response) => {
       };
     }
 
+    // Invalidate taste profile asynchronously
+    invalidateTasteProfile(userId).catch(() => {});
+
     res.status(201).json({
       message: "Post created successfully",
       post: postWithRankings,
@@ -239,11 +251,64 @@ export const createPost = async (req: AuthRequest, res: Response) => {
   }
 };
 
+// Helper: batch-fetch album rankings and song scores for a list of posts
+async function enrichPostsWithRankings(posts: any[], supabase: any) {
+  if (!posts || posts.length === 0) return [];
+
+  // Batch fetch album rankings for all album posts
+  const albumPostIds = posts
+    .filter((p: any) => p.album_id)
+    .map((p: any) => p.post_id);
+
+  const albumRankingsMap: Record<number, any[]> = {};
+  if (albumPostIds.length > 0) {
+    const { data: allAlbumRankings } = await supabase
+      .from("album_rankings")
+      .select("*")
+      .in("post_id", albumPostIds)
+      .order("rank", { ascending: true });
+
+    for (const ranking of allAlbumRankings || []) {
+      if (!albumRankingsMap[ranking.post_id]) {
+        albumRankingsMap[ranking.post_id] = [];
+      }
+      albumRankingsMap[ranking.post_id].push(ranking);
+    }
+  }
+
+  // Batch fetch song scores for all song posts
+  const songPosts = posts.filter((p: any) => p.top_song_id);
+  const songScoreMap: Record<string, number | null> = {};
+  if (songPosts.length > 0) {
+    const orFilter = songPosts
+      .map((p: any) => `and(user_id.eq.${p.user_id},song_id.eq.${p.top_song_id})`)
+      .join(",");
+    const { data: allSongRankings } = await supabase
+      .from("song_rankings")
+      .select("user_id, song_id, score")
+      .or(orFilter);
+
+    for (const ranking of allSongRankings || []) {
+      songScoreMap[`${ranking.user_id}_${ranking.song_id}`] = ranking.score;
+    }
+  }
+
+  // Merge results
+  return posts.map((post: any) => ({
+    ...post,
+    albumRankings: albumRankingsMap[post.post_id] || [],
+    songScore: post.top_song_id
+      ? songScoreMap[`${post.user_id}_${post.top_song_id}`] ?? null
+      : null,
+  }));
+}
+
 // Get posts for a specific user
-export const getPostsByUserId = async (req: Request, res: Response) => {
+export const getPostsByUserId = async (req: AuthRequest, res: Response) => {
   try {
     const { userId } = req.params;
     const { limit = 20, offset = 0 } = req.query;
+    const requesterId = req.userId;
 
     if (!userId) {
       return res.status(400).json({ message: "User ID is required" });
@@ -305,39 +370,30 @@ export const getPostsByUserId = async (req: Request, res: Response) => {
       throw error;
     }
 
-    // Fetch album rankings and song scores for posts
-    const postsWithRankings = await Promise.all(
-      (posts || []).map(async (post: any) => {
-        let albumRankings = [];
-        let songScore = null;
+    // Filter posts by visibility
+    let filteredPosts = posts || [];
+    if (requesterId !== userId) {
+      // Check if requester is a friend
+      let isFriend = false;
+      if (requesterId) {
+        const { data: friendship } = await supabase
+          .from("friends")
+          .select("status")
+          .eq("user_one_id", requesterId)
+          .eq("user_two_id", userId)
+          .eq("status", "accepted")
+          .maybeSingle();
+        isFriend = !!friendship;
+      }
+      filteredPosts = filteredPosts.filter((post: any) => {
+        if (post.visibility === "public") return true;
+        if (post.visibility === "friends_only" && isFriend) return true;
+        return false; // hide private posts
+      });
+    }
 
-        // Fetch album rankings if it's an album post
-        if (post.album_id) {
-          const { data: rankings } = await supabase
-            .from("album_rankings")
-            .select("*")
-            .eq("post_id", post.post_id)
-            .order("rank", { ascending: true });
-          albumRankings = rankings || [];
-        }
-
-        // Fetch song score if it's a song post
-        if (post.top_song_id) {
-          const { data: scoreData } = await supabase
-            .from("song_rankings")
-            .select("score")
-            .eq("user_id", post.user_id)
-            .eq("song_id", post.top_song_id)
-            .single();
-
-          if (scoreData) {
-            songScore = scoreData.score;
-          }
-        }
-
-        return { ...post, albumRankings, songScore };
-      })
-    );
+    // Batch fetch album rankings and song scores (fixes N+1 query)
+    const postsWithRankings = await enrichPostsWithRankings(filteredPosts, supabase);
 
     res.status(200).json({
       message: "Posts retrieved successfully",
@@ -358,17 +414,17 @@ export const getPostsByUserId = async (req: Request, res: Response) => {
   }
 };
 
-// Get all posts (for feed functionality - bonus)
+// Get all posts (for feed functionality)
 export const getAllPosts = async (req: AuthRequest, res: Response) => {
   try {
-    const { limit = 20, offset = 0, visibility = "public", following = "false" } = req.query;
+    const { limit = 20, offset = 0, following = "false" } = req.query;
     const userId = req.userId; // Optional user ID for like status
 
     const supabase = await getDatabase();
 
-    // If filtering by following, get the list of users the current user follows
+    // Get the list of users the current user follows (needed for visibility + following filter)
     let followingUserIds: string[] = [];
-    if (following === "true" && userId) {
+    if (userId) {
       const { data: friendships } = await supabase
         .from("friends")
         .select("user_two_id")
@@ -376,23 +432,23 @@ export const getAllPosts = async (req: AuthRequest, res: Response) => {
         .eq("status", "accepted");
 
       followingUserIds = friendships?.map((f) => f.user_two_id) || [];
-
-      // If user follows no one, return empty array
-      if (followingUserIds.length === 0) {
-        return res.status(200).json({
-          message: "Posts retrieved successfully",
-          posts: [],
-          pagination: {
-            total: 0,
-            limit: Number(limit),
-            offset: Number(offset),
-            hasMore: false,
-          },
-        });
-      }
     }
 
-    // Get all posts with related data
+    // If filtering by following and user follows no one, return empty
+    if (following === "true" && followingUserIds.length === 0) {
+      return res.status(200).json({
+        message: "Posts retrieved successfully",
+        posts: [],
+        pagination: {
+          total: 0,
+          limit: Number(limit),
+          offset: Number(offset),
+          hasMore: false,
+        },
+      });
+    }
+
+    // Build query with visibility enforcement
     let query = supabase
       .from("posts")
       .select(
@@ -421,11 +477,26 @@ export const getAllPosts = async (req: AuthRequest, res: Response) => {
                 ),
                 likes!left (
                     user_id
-                )
+                ),
+                reactions!left (
+                    user_id,
+                    reaction_type
+                ),
+                reaction_summary
             `,
         { count: "exact" }
-      )
-      .eq("visibility", visibility);
+      );
+
+    // Enforce visibility: show public posts + friends_only from followed users + own posts
+    if (userId) {
+      const visibleUserIds = [...followingUserIds, userId];
+      query = query.or(
+        `visibility.eq.public,and(visibility.eq.friends_only,user_id.in.(${visibleUserIds.join(",")})),user_id.eq.${userId}`
+      );
+    } else {
+      // Unauthenticated: only public posts
+      query = query.eq("visibility", "public");
+    }
 
     // Filter by following users if requested
     if (following === "true" && followingUserIds.length > 0) {
@@ -445,48 +516,24 @@ export const getAllPosts = async (req: AuthRequest, res: Response) => {
       throw error;
     }
 
-    // Fetch album rankings and song scores for posts
-    const postsWithRankings = await Promise.all(
-      (posts || []).map(async (post: any) => {
-        let albumRankings = [];
-        let songScore = null;
+    // Batch fetch album rankings and song scores (fixes N+1 query)
+    const postsWithRankings = await enrichPostsWithRankings(posts || [], supabase);
 
-        // Fetch album rankings if it's an album post
-        if (post.album_id) {
-          const { data: rankings } = await supabase
-            .from("album_rankings")
-            .select("*")
-            .eq("post_id", post.post_id)
-            .order("rank", { ascending: true });
-          albumRankings = rankings || [];
-        }
-
-        // Fetch song score if it's a song post
-        if (post.top_song_id) {
-          const { data: scoreData } = await supabase
-            .from("song_rankings")
-            .select("score")
-            .eq("user_id", post.user_id)
-            .eq("song_id", post.top_song_id)
-            .single();
-
-          if (scoreData) {
-            songScore = scoreData.score;
-          }
-        }
-
-        return { ...post, albumRankings, songScore };
-      })
-    );
-
-    // Process posts to add isLiked field for the current user
+    // Process posts to add reaction/like data for the current user
     const processedPosts =
-      postsWithRankings?.map((post) => ({
-        ...post,
-        isLiked: userId
-          ? post.likes?.some((like: any) => like.user_id === userId)
-          : false,
-      })) || [];
+      postsWithRankings?.map((post) => {
+        const userReaction = userId
+          ? post.reactions?.find((r: any) => r.user_id === userId)?.reaction_type ?? null
+          : null;
+        return {
+          ...post,
+          isLiked: userId
+            ? post.likes?.some((like: any) => like.user_id === userId)
+            : false,
+          userReaction,
+          reaction_summary: post.reaction_summary || {},
+        };
+      }) || [];
 
     res.status(200).json({
       message: "Posts retrieved successfully",
@@ -507,22 +554,52 @@ export const getAllPosts = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// Like or unlike a post
-export const toggleLike = async (req: AuthRequest, res: Response) => {
+const VALID_REACTION_TYPES = ["fire", "crying", "mind_blown", "dance", "chill", "love"] as const;
+
+// Helper: recompute reaction_summary for a post from the reactions table
+async function recomputeReactionSummary(postId: number, supabase: any) {
+  const { data: reactions } = await supabase
+    .from("reactions")
+    .select("reaction_type")
+    .eq("post_id", postId);
+
+  const summary: Record<string, number> = {};
+  let totalCount = 0;
+  for (const r of reactions || []) {
+    summary[r.reaction_type] = (summary[r.reaction_type] || 0) + 1;
+    totalCount++;
+  }
+
+  await supabase
+    .from("posts")
+    .update({
+      reaction_summary: summary,
+      like_count: totalCount,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("post_id", postId);
+
+  return { summary, totalCount };
+}
+
+// React to a post (toggle reaction)
+export const toggleReaction = async (req: AuthRequest, res: Response) => {
   try {
     const { postId } = req.params;
-    const userId = req.userId; // Get user ID from authenticated request
+    const { reactionType = "love" } = req.body;
+    const userId = req.userId;
 
-    // Validate required fields
     if (!userId) {
-      return res.status(401).json({
-        message: "Authentication required",
-      });
+      return res.status(401).json({ message: "Authentication required" });
     }
 
     if (!postId) {
+      return res.status(400).json({ message: "Post ID is required" });
+    }
+
+    if (!VALID_REACTION_TYPES.includes(reactionType)) {
       return res.status(400).json({
-        message: "Post ID is required",
+        message: `Invalid reaction type. Must be one of: ${VALID_REACTION_TYPES.join(", ")}`,
       });
     }
 
@@ -531,7 +608,7 @@ export const toggleLike = async (req: AuthRequest, res: Response) => {
     // Check if post exists
     const { data: post, error: postError } = await supabase
       .from("posts")
-      .select("post_id, like_count")
+      .select("post_id")
       .eq("post_id", postId)
       .single();
 
@@ -539,83 +616,99 @@ export const toggleLike = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ message: "Post not found" });
     }
 
-    // Check if user has already liked this post
-    const { data: existingLike, error: likeError } = await supabase
-      .from("likes")
-      .select("user_id, post_id")
+    // Check for existing reaction
+    const { data: existingReaction, error: checkError } = await supabase
+      .from("reactions")
+      .select("id, reaction_type")
       .eq("user_id", userId)
       .eq("post_id", postId)
-      .single();
+      .maybeSingle();
 
-    if (likeError && likeError.code !== "PGRST116") {
-      console.error("Error checking existing like:", likeError);
-      throw likeError;
+    if (checkError) {
+      console.error("Error checking existing reaction:", checkError);
+      throw checkError;
     }
 
-    let newLikeCount = post.like_count;
     let action = "";
+    let newReactionType: string | null = null;
 
-    if (existingLike) {
-      // Unlike the post
-      const { error: deleteError } = await supabase
-        .from("likes")
-        .delete()
-        .eq("user_id", userId)
-        .eq("post_id", postId);
+    if (existingReaction) {
+      if (existingReaction.reaction_type === reactionType) {
+        // Same reaction — remove it (toggle off)
+        const { error: deleteError } = await supabase
+          .from("reactions")
+          .delete()
+          .eq("id", existingReaction.id);
 
-      if (deleteError) {
-        console.error("Error removing like:", deleteError);
-        throw deleteError;
+        if (deleteError) throw deleteError;
+        action = "removed";
+        newReactionType = null;
+      } else {
+        // Different reaction — update it
+        const { error: updateError } = await supabase
+          .from("reactions")
+          .update({ reaction_type: reactionType })
+          .eq("id", existingReaction.id);
+
+        if (updateError) throw updateError;
+        action = "updated";
+        newReactionType = reactionType;
       }
-
-      newLikeCount = Math.max(0, post.like_count - 1);
-      action = "unliked";
     } else {
-      // Like the post
-      const { error: insertError } = await supabase.from("likes").insert([
-        {
+      // No existing reaction — create one
+      const { error: insertError } = await supabase
+        .from("reactions")
+        .insert([{
           user_id: userId,
           post_id: parseInt(postId),
+          reaction_type: reactionType,
           created_at: new Date().toISOString(),
-        },
-      ]);
+        }]);
 
-      if (insertError) {
-        console.error("Error adding like:", insertError);
-        throw insertError;
-      }
-
-      newLikeCount = post.like_count + 1;
-      action = "liked";
+      if (insertError) throw insertError;
+      action = "added";
+      newReactionType = reactionType;
     }
 
-    // Update the like count in the posts table
-    const { error: updateError } = await supabase
-      .from("posts")
-      .update({
-        like_count: newLikeCount,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("post_id", postId);
+    // Recompute reaction summary and invalidate taste profile
+    const { summary, totalCount } = await recomputeReactionSummary(parseInt(postId), supabase);
+    invalidateTasteProfile(userId).catch(() => {});
 
-    if (updateError) {
-      console.error("Error updating like count:", updateError);
-      throw updateError;
+    // Also maintain backward compatibility with likes table
+    if (action === "added") {
+      // Insert into likes if not exists (for backward compat)
+      await supabase.from("likes").upsert([{
+        user_id: userId,
+        post_id: parseInt(postId),
+        created_at: new Date().toISOString(),
+      }], { onConflict: "user_id,post_id" }).select();
+    } else if (action === "removed") {
+      await supabase.from("likes").delete()
+        .eq("user_id", userId)
+        .eq("post_id", postId);
     }
 
     res.status(200).json({
-      message: `Post ${action} successfully`,
-      likeCount: newLikeCount,
-      action: action,
-      isLiked: action === "liked",
+      message: `Reaction ${action} successfully`,
+      action,
+      reactionType: newReactionType,
+      reactionSummary: summary,
+      likeCount: totalCount,
+      isLiked: newReactionType !== null,
     });
   } catch (error) {
-    console.error("Error in toggleLike:", error);
+    console.error("Error in toggleReaction:", error);
     res.status(500).json({
       message: "Internal server error",
       error: error instanceof Error ? error.message : "Unknown error",
     });
   }
+};
+
+// Legacy like endpoint — maps to 'love' reaction
+export const toggleLike = async (req: AuthRequest, res: Response) => {
+  req.body.reactionType = "love";
+  return toggleReaction(req, res);
 };
 
 // Create a new comment on a post
@@ -635,6 +728,12 @@ export const createComment = async (req: AuthRequest, res: Response) => {
     if (!body || body.trim() === "") {
       return res.status(400).json({
         message: "Comment body is required",
+      });
+    }
+
+    if (body.length > 2000) {
+      return res.status(400).json({
+        message: "Comment body exceeds maximum length of 2000 characters",
       });
     }
 
